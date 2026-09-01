@@ -1,20 +1,4 @@
-"""
-Skin Condition Classifier — Streamlit App
-Days 7-8: Application layer wrapping the trained EfficientNet-B0 Stage 1 model.
-
-Architecture note (per the v1 design decision from Days 1-2): the questionnaire
-is a SEPARATE, rules-based layer. It does NOT feed into the model or influence
-the classification scores in any way — it only shapes which educational/
-self-care content gets surfaced alongside the model's prediction. Combining
-image + questionnaire into a single multimodal model is the explicit v2
-upgrade path, not attempted here.
-
-Model: EfficientNet-B0, frozen backbone (Stage 1), trained on DermNet.
-Current shipped checkpoint: val macro-F1 0.535, test macro-F1 0.520.
-(Checkpoint was regenerated after an accidental retrain overwrote the
-original Day 6 weights — see project documentation for the full account.)
-"""
-
+# Model: EfficientNet-B0, frozen backbone, trained on DermNet
 import streamlit as st
 import torch
 from torch import nn
@@ -22,11 +6,6 @@ from torchvision import models, transforms
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-# ---------------------------------------------------------------------------
-# Constants — CLASS_NAMES order MUST exactly match the order used during
-# training (train_stage1.py, CLASS_FOLDER_MAP) or predictions will be
-# silently mislabeled. Do not reorder this list.
-# ---------------------------------------------------------------------------
 CLASS_NAMES = [
     "Eczema",
     "Hives",
@@ -36,29 +15,20 @@ CLASS_NAMES = [
     "Ringworm/Fungal Infections",
 ]
 
-# Classes flagged as lower-confidence based on measured evaluation history.
-# Contact Dermatitis has five independent readings across the project
-# (0.255 / 0.376 / 0.364 / 0.325 / 0.349 F1), all below the pre-committed
-# 0.40 floor — this is a documented, stable limitation, not a guess.
+# Contact Dermatitis / Poison Ivy flagged as lower confidence according to findings
 LOWER_CONFIDENCE_CLASSES = {"Contact Dermatitis/Poison Ivy"}
-
 HF_MODEL_REPO = "ericc926/skin-condition-classifier"
 HF_MODEL_FILENAME = "best_model_stage1.pt"
-
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-# ---------------------------------------------------------------------------
-# Educational content — static, drafted as a starting point. Eric: review
-# and edit freely, especially tone/specifics; nothing here is meant to be
-# taken as final medical copy.
-# ---------------------------------------------------------------------------
+# Educational Content to be displayed to the user after answering questions
 EDUCATIONAL_CONTENT = {
     "Eczema": {
         "what_it_is": (
             "Eczema (atopic dermatitis) is a common condition that causes patches "
             "of dry, itchy, inflamed skin. It often appears in the folds of elbows "
-            "and knees, though it can show up almost anywhere."
+            "and knees, although it can show up almost anywhere."
         ),
         "common_causes": [
             "A tendency to run in families alongside asthma or allergies",
@@ -67,8 +37,8 @@ EDUCATIONAL_CONTENT = {
         ],
         "self_care": [
             "Moisturize generously, ideally right after bathing while skin is still damp",
-            "Use fragrance-free, gentle cleansers instead of harsh soaps",
-            "Avoid scratching where possible — it can worsen irritation and risk infection",
+            "Use fragrance free, gentle cleansers instead of harsh soaps",
+            "Avoid scratching where possible as it can worsen irritation and risk infection",
             "Identify and avoid personal triggers (certain fabrics, detergents, etc.)",
         ],
     },
@@ -88,14 +58,14 @@ EDUCATIONAL_CONTENT = {
             "Cool compresses can help ease itching and swelling",
             "Loose, breathable clothing reduces skin irritation",
             "Seek urgent care if hives come with swelling of the face/throat or trouble "
-            "breathing — this can signal a serious allergic reaction",
+            "breathing which can signal a serious allergic reaction",
         ],
     },
     "Acne/Rosacea": {
         "what_it_is": (
             "This category covers acne (clogged pores causing pimples, blackheads, "
             "or cysts) and rosacea (facial redness and visible blood vessels, "
-            "sometimes with bumps) — two distinct conditions grouped together here "
+            "sometimes with bumps). Two distinct conditions grouped together here "
             "because of how the source dataset is organized."
         ),
         "common_causes": [
@@ -104,8 +74,8 @@ EDUCATIONAL_CONTENT = {
             "and triggers like sun, heat, or spicy food",
         ],
         "self_care": [
-            "Use gentle, non-comedogenic skincare products",
-            "Avoid picking or popping — it can worsen scarring",
+            "Use gentle, non-comedogenic (less likely to clog pores) skincare products",
+            "Avoid picking or popping as it can worsen scarring",
             "For rosacea, track and avoid personal flare triggers (sun exposure, alcohol, "
             "spicy food are common ones)",
             "Consistent, gentle routines tend to help more than aggressive treatment",
@@ -115,7 +85,7 @@ EDUCATIONAL_CONTENT = {
         "what_it_is": (
             "This category covers psoriasis (an immune-driven condition causing "
             "thick, scaly patches) and lichen planus (an inflammatory condition "
-            "causing itchy, flat-topped bumps) — grouped together here based on "
+            "causing itchy, flat-topped bumps), they are grouped together here based on "
             "the source dataset's original categorization."
         ),
         "common_causes": [
@@ -127,14 +97,14 @@ EDUCATIONAL_CONTENT = {
         "self_care": [
             "Moisturize regularly to reduce scaling and discomfort",
             "Avoid scratching or picking at patches",
-            "Track flare patterns — stress, weather, and certain medications are common triggers",
+            "Track flare patterns: stress, weather, and certain medications are common triggers",
             "These conditions often benefit from professional treatment beyond self-care alone",
         ],
     },
     "Contact Dermatitis/Poison Ivy": {
         "what_it_is": (
             "Contact dermatitis is skin irritation or an allergic reaction from "
-            "something touching the skin — ranging from plants like poison ivy to "
+            "something touching the skin, ranging from plants like poison ivy to "
             "soaps, metals, or cosmetics."
         ),
         "common_causes": [
@@ -145,14 +115,14 @@ EDUCATIONAL_CONTENT = {
         "self_care": [
             "Identify and avoid the suspected trigger going forward",
             "Wash the area gently to remove any remaining irritant",
-            "Cool compresses and fragrance-free moisturizers can ease discomfort",
+            "Cool compresses and fragrance free moisturizers can ease discomfort",
             "If a new product, plant, or metal was involved recently, that's a strong "
             "clue worth mentioning to a doctor",
         ],
     },
     "Ringworm/Fungal Infections": {
         "what_it_is": (
-            "Despite the name, ringworm isn't a worm — it's a fungal infection "
+            "Despite the name, ringworm isn't a worm, it's actually a fungal infection "
             "that often (but not always) causes a ring-shaped, scaly, itchy patch."
         ),
         "common_causes": [
@@ -161,42 +131,34 @@ EDUCATIONAL_CONTENT = {
             "transmission points",
         ],
         "self_care": [
-            "Keep the area clean and dry — fungi thrive in moisture",
+            "Keep the area clean and dry as fungi thrive in moisture",
             "Avoid sharing towels, clothing, or equipment while it's active",
-            "Over-the-counter antifungal creams are the standard first-line self-care option",
+            "Over the counter antifungal creams are the standard first self-care option",
             "See a doctor if it doesn't improve within a couple of weeks of consistent "
             "antifungal use",
         ],
     },
 }
 
-# ---------------------------------------------------------------------------
-# Questionnaire — a separate rules-based layer (v1 design decision).
-# These answers never touch the model; they only select which contextual
-# notes get appended to the results screen.
-# ---------------------------------------------------------------------------
 DURATION_OPTIONS = ["A few days", "A few weeks", "Months or longer"]
 ITCH_OPTIONS = ["None", "Mild", "Severe"]
 LOCATION_OPTIONS = ["Face", "Trunk (chest/back/stomach)", "Limbs (arms/legs)", "Hands or feet", "Other"]
 EXPOSURE_OPTIONS = ["No", "Yes"]
 
-
 def build_contextual_notes(predicted_class, duration, itch, location, exposure):
-    """Rules-based content selection — questionnaire answers shape which
-    notes are shown, never the prediction itself."""
     notes = []
 
     if duration == "Months or longer":
         notes.append(
             "Because this has persisted for months or longer, it's worth prioritizing "
-            "an in-person evaluation soon, regardless of the result above — persistent "
+            "an in-person evaluation soon, regardless of the result above. Persistent "
             "skin changes are generally worth a professional look."
         )
 
     if exposure == "Yes":
         notes.append(
             "You mentioned a recent new exposure (product, plant, metal, etc.). That's "
-            "a detail specifically worth mentioning to a doctor, since it's a strong "
+            "something specifically worth mentioning to a doctor, since it's a strong "
             "clue for contact dermatitis regardless of what this tool predicted."
         )
 
@@ -204,21 +166,17 @@ def build_contextual_notes(predicted_class, duration, itch, location, exposure):
     if itch == "Severe" and predicted_class not in itchy_conditions:
         notes.append(
             "Severe itching isn't the most typical presentation for the predicted "
-            "category — this doesn't rule it out, but it's a detail worth flagging "
+            "category so this doesn't rule it out, but it's a detail worth mentioning "
             "if you do see a professional."
         )
 
     return notes
 
 
-# ---------------------------------------------------------------------------
-# Model loading & inference
-# ---------------------------------------------------------------------------
+# Model loading:
 @st.cache_resource
 def load_model():
-    """Downloads the checkpoint from Hugging Face Hub once per app session
-    and rebuilds the exact training-time architecture before loading weights.
-    The checkpoint only stores a state_dict, not the architecture itself."""
+    # Downloads the checkpoint from Hugging Face Hub once per app session
     weights_path = hf_hub_download(repo_id=HF_MODEL_REPO, filename=HF_MODEL_FILENAME)
 
     model = models.efficientnet_b0(weights=None)
@@ -246,16 +204,14 @@ def predict(model, image: Image.Image):
     return probs.tolist()
 
 
-# ---------------------------------------------------------------------------
-# App layout
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="Skin Condition Visual Similarity", page_icon="🔬", layout="centered")
+# App layout:
+st.set_page_config(page_title="Skin Condition Visual Similarity", page_icon="", layout="centered")
 
-st.title("Skin Condition Visual Similarity Tool")
+st.title("AI Based Skin Condition Visual Similarity Tool")
 
 st.warning(
     "**This is an educational tool, not a medical diagnosis.** It compares your "
-    "photo's visual patterns to a training dataset and reports similarity — it "
+    "photo's visual patterns to a training dataset and reports similarity, it "
     "cannot confirm what a skin condition actually is. Always consult a healthcare "
     "professional for an actual diagnosis, especially for anything persistent, "
     "spreading, or concerning."
@@ -268,9 +224,9 @@ with st.expander("About this tool and its limitations"):
         "- Recognizes 6 categories, several of which are merged groupings from "
         "the source dataset (e.g. results labeled 'Acne/Rosacea' do not "
         "distinguish between the two)\n"
-        "- Test-set macro-F1: 0.520 — a moderate, honestly-reported accuracy level, "
+        "- Test-set macro-F1: 0.520, a moderate honest accuracy level, "
         "not a clinical-grade result\n"
-        "- Contact Dermatitis/Poison Ivy is a known weaker category (flagged "
+        "- Contact Dermatitis/Poison Ivy is a known weaker category (will be flagged "
         "below whenever it's the top result)"
     )
 
@@ -281,7 +237,7 @@ uploaded_file = st.file_uploader(
 
 st.subheader("2. A few quick questions")
 st.caption(
-    "These don't affect the prediction — they only tailor which notes and "
+    "These don't affect the prediction, they can only affect which notes and "
     "self-care tips are shown alongside it."
 )
 
@@ -317,11 +273,11 @@ if submitted and uploaded_file is not None:
 
         if top_class in LOWER_CONFIDENCE_CLASSES:
             st.error(
-                "**Lower-confidence category.** Across repeated evaluation, this "
+                "**Lower-confidence category.** Across repeated testing, this "
                 "category has consistently underperformed the others (test F1 "
-                "≈ 0.32–0.38 across five separate measurements) — likely due to "
+                "around 0.32–0.38 across five separate measurements), likely due to "
                 "visual overlap with other conditions and a smaller training set. "
-                "Treat this result with extra caution and weight a professional "
+                "Treat this result with extra caution and consider a professional "
                 "opinion more heavily than usual."
             )
 
